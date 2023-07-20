@@ -1,9 +1,9 @@
 package databusc
 
 import (
-	"time"
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 	"github.com/mapgoo-lab/atreus/pkg/log"
+	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"time"
 )
 
 type ProducerEvent interface {
@@ -21,19 +21,23 @@ type ProducerEvent interface {
 }
 
 type ProducerParam struct {
-	Address string
-	Topic string
-	IsAck bool
+	Address  string
+	Topic    string
+	IsAck    bool
 	KafkaVer string
 	//0:channel 1:sync
 	ConsumerMode int
+	//批量发送
+	Batch bool
+	//true-同步发送 false-协程异步
+	Sync bool
 }
 
 type producerEvent struct {
-	isclose bool
-	param *ProducerParam
-	config kafka.ConfigMap
-	producer *kafka.Producer
+	isclose      bool
+	param        *ProducerParam
+	config       kafka.ConfigMap
+	producer     *kafka.Producer
 	maxpartition uint32
 }
 
@@ -49,6 +53,9 @@ func NewAsyncProducer(param *ProducerParam) (ProducerEvent, error) {
 	handle.config["go.delivery.reports"] = false
 	handle.config["request.required.acks"] = 1
 	handle.config["acks"] = 1
+	if handle.param.Batch {
+		handle.config["go.batch.producer"] = true
+	}
 
 	producer, err := kafka.NewProducer(&handle.config)
 	if err != nil {
@@ -63,7 +70,7 @@ func NewAsyncProducer(param *ProducerParam) (ProducerEvent, error) {
 		log.Error("NewAsyncProducer error(topic:%s,medaerr:%v).", param.Topic, medaerr)
 		return nil, medaerr
 	}
-	
+
 	handle.maxpartition = uint32(len(medaresp.Topics[param.Topic].Partitions))
 
 	log.Info("NewAsyncProducer(topic:%s,maxpartition:%d).", param.Topic, handle.maxpartition)
@@ -118,7 +125,7 @@ func (handle *producerEvent) transMessage(data []byte, key string, partition int
 	message.Value = data
 	message.Timestamp = time.Now()
 
-	go func (msg *kafka.Message) {
+	sendFunc := func(msg *kafka.Message) {
 		if handle.param.ConsumerMode == 0 {
 			handle.producer.ProduceChannel() <- msg
 		} else {
@@ -140,7 +147,15 @@ func (handle *producerEvent) transMessage(data []byte, key string, partition int
 				}
 			}
 		}
-	}(message)
+	}
+
+	if handle.param.Sync {
+		//同步发送
+		sendFunc(message)
+	} else {
+		//协程异步
+		go sendFunc(message)
+	}
 
 	return nil
 }
